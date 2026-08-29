@@ -43,9 +43,33 @@ option lcp_echo_failure '3'
 - VLAN for ISP IPTV: `1020`
 - Docker is also running on the router (relevant for troubleshooting)
 
-**Problem**: The set-top box loaded its configuration/EPG, but showed no picture.
+**Problem**: The set-top box loaded its configuration/EPG, but showed no
+picture, then later showed no picture at all — no DHCP lease.
 
-**Diagnosis**: Checked whether the STB was getting a DHCP lease:
+**Diagnosis (1) — no multicast traffic on the bridge**:
+```sh
+tcpdump -i eth1.1020 -n udp and net 224.0.0.0/4 -c 20
+```
+Result: 0 packets — no video traffic arriving from the ISP side at all.
+
+Checked the bridge's actual port membership:
+```sh
+bridge link show
+```
+Result:
+
+5: eth3@eth0: ... master br-lan ...
+37: eth1.1020@eth1: ... master Bridge_iptv ...
+
+**Root cause**: despite adding `eth3` to `Bridge_iptv` in LuCI, the port
+was still physically a member of `br-lan` (the default LAN bridge) as well.
+A network port can only belong to one bridge — `eth3` was effectively
+still serving LAN traffic, and `Bridge_iptv` only had one real member.
+
+**Fix (1)**: Removed `eth3` from `br-lan`'s port list. Verified with
+`bridge link show` that `eth3` now correctly showed `master Bridge_iptv`.
+
+**Diagnosis (2) — still no DHCP after fixing bridge membership**:
 ```sh
 tcpdump -i eth3 -n port 67 or port 68
 ```
@@ -68,16 +92,16 @@ sysctl net.bridge.bridge-nf-call-iptables
 Result: `1` — traffic crossing the L2 bridge was being routed through the
 firewall (`bridge-netfilter`) instead of being switched directly.
 
-**Fix (test)**:
+**Fix (2, test)**:
 ```sh
 sysctl -w net.bridge.bridge-nf-call-iptables=0
 ```
 After restarting the STB, the picture appeared — confirming the root cause.
 
-**Fix (permanent)**: A plain `/etc/sysctl.d/*.conf` entry didn't survive a
-reboot on its own, because the `br_netfilter` module wasn't loaded yet when
-`sysctl.d` was read at boot — it loaded later, when Docker (also running on
-this router) started, and Docker reset the value back to `1`.
+**Fix (2, permanent)**: A plain `/etc/sysctl.d/*.conf` entry didn't survive
+a reboot on its own, because the `br_netfilter` module wasn't loaded yet
+when `sysctl.d` was read at boot — it loaded later, when Docker (also
+running on this router) started, and Docker reset the value back to `1`.
 
 Solution: a custom init script with a high start priority (`START=99`),
 run after Docker starts:
@@ -125,3 +149,147 @@ Also set `restart: unless-stopped` for the `immich-server`, `redis`, and
 Verified with a full reboot test: Immich came up cleanly on the login screen
 (not the welcome screen). Postgres ran WAL crash recovery automatically on
 first start, with no data loss.
+---
+
+## 4. Zabbix web UI unreachable from LAN despite working locally (dual firewall)
+
+**Setup**: Zabbix deployed via Docker Compose on an OpenWrt router
+(Banana Pi BPI-R4 Pro) running both **nftables (fw4)**, the native OpenWrt
+firewall, and **iptables-legacy**, managed independently by `dockerd` —
+both attached to the same kernel netfilter hooks.
+
+**Problem**: `curl -I http://localhost:18081` on the router itself returned
+`200 OK`, but any browser on the LAN got an immediate **connection reset
+(RST)** — too fast (~100µs) to be a real response from the container.
+
+**Diagnosis**:
+
+`curl` from `localhost` was misleading — it was hitting `docker-proxy`
+(a process listening directly on the host), not the actual NAT/FORWARD
+path that LAN traffic takes.
+
+Traced the LAN request step by step:
+```sh
+tcpdump -i br-lan port 18081 -n
+```
+Confirmed the SYN reached the router, but the reply was an instant RST —
+pointing to a router-side reject, not a network issue.
+
+**Root cause, layer 1** — an iptables-legacy `DOCKER-USER` rule:
+
+REJECT 0 -- 0.0.0.0/0 0.0.0.0/0 reject-with icmp-port-unreachable
+
+This was meant to block only WAN traffic, but the init script couldn't
+correctly detect the WAN interface on this platform, so it inserted the
+rule with no interface filter at all — blocking everything, LAN included.
+
+**Root cause, layer 2** — `docker compose` creates its own bridge network
+with a random name (e.g. `br-acf03cfc7989`) by default. OpenWrt's native
+firewall (fw4) only knows about `docker0` (added manually to UCI during
+the initial Docker install). Traffic to an unrecognized bridge hit fw4's
+`jump handle_reject` → RST.
+
+**Root cause, layer 3** (the actual blocker, found after fixing 1 and 2) —
+even with the new bridge properly named and added to the `docker` firewall
+zone, inspecting the nftables ruleset showed the `lan` zone's forwarding
+chain only had rules to reach `wan` and back to `lan` — no rule at all
+forwarding `lan → docker`. The packet matched nothing and fell through to
+the default reject.
+
+**Fix**:
+1. Pinned the compose network to a known bridge name:
+```yaml
+   networks:
+     zabbix-net:
+       driver: bridge
+       driver_opts:
+         com.docker.network.bridge.name: br-zabbix
+```
+2. Added that bridge to the `docker` firewall zone in UCI:
+```sh
+   uci add_list firewall.docker.device='br-zabbix'
+   uci commit firewall
+   service firewall reload
+```
+3. Added the missing forwarding rule:
+```sh
+   uci add firewall forwarding
+   uci set firewall.@forwarding[-1].src='lan'
+   uci set firewall.@forwarding[-1].dest='docker'
+   uci commit firewall
+   service firewall reload
+```
+4. Re-secured WAN access explicitly (defense-in-depth, since the original
+   `DOCKER-USER` blanket-block rule had been removed during diagnosis):
+```sh
+   uci add firewall rule
+   uci set firewall.@rule[-1].name='Block-WAN-to-Docker'
+   uci set firewall.@rule[-1].src='wan'
+   uci set firewall.@rule[-1].dest='docker'
+   uci set firewall.@rule[-1].target='REJECT'
+   uci set firewall.@rule[-1].family='any'
+   uci commit firewall
+   service firewall reload
+```
+   Verified from an external network (mobile data, not Wi-Fi) that the
+   web UI is unreachable from WAN.
+
+**Takeaway**: on this platform, two independent firewalls sit on the same
+netfilter hooks. An instant RST almost always means a REJECT in one of
+them — worth checking both `iptables -L` and `nft list ruleset`
+separately, since they're entirely independent rule sets.
+
+---
+
+## 5. OpenMediaVault SMB share writable via CLI, read-only from iOS Files
+
+**Setup**: OMV on Raspberry Pi, SMB share `Pi_NAS` on a mergerfs volume,
+accessed from an iPhone via the Files app over SMB 3.11.
+
+**Problem**: The share was visible and browsable from iOS, but "New
+Folder" was greyed out and no files could be written — despite logging in
+with a real (non-guest) account.
+
+**Diagnosis — ruling out permissions**: `getfacl` confirmed `rwx` for the
+correct group, and `sudo -u <user> touch file` succeeded — filesystem
+permissions were fine. `smb.conf` had `read only = no` and the correct
+write list. `smbstatus -b` confirmed the session authenticated correctly
+as the real user over SMB3. Writing directly via `smbclient` from the
+command line also succeeded — meaning the raw SMB protocol path allowed
+writes, but the iOS Files client specifically did not.
+
+**Root cause**: `smb.conf` had the Apple-compatibility VFS module enabled
+globally:
+```ini
+[global]
+vfs objects = fruit streams_xattr
+```
+But the specific `[Pi_NAS]` share had this same parameter explicitly
+overridden to empty:
+```ini
+[Pi_NAS]
+vfs objects =
+```
+In Samba, list-type parameters like `vfs objects` are fully overridden at
+the share level, not merged with the global config — so `fruit` was
+silently disabled for this one share. iOS relies on Apple's protocol
+extensions to correctly interpret permissions and file attributes, and
+without them it defaulted to treating the share as read-only, even though
+the underlying permissions were correct.
+
+**Fix**: In OMV's share config ("Extra options" field), added, on
+separate lines:
+```ini
+vfs objects = fruit streams_xattr
+fruit:metadata = stream
+```
+(combining both directives on one line causes Samba to misparse
+everything after the first `=` as a single value). Restarted the service:
+```sh
+sudo systemctl restart smbd
+```
+After reconnecting on iPhone, writes worked correctly.
+
+**Takeaway**: "read-only, but only from iOS/macOS, while other SMB clients
+work fine" is a strong signal to check the `fruit` VFS module
+configuration specifically, rather than ACL/POSIX permissions.
