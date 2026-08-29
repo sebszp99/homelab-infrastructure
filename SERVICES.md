@@ -42,7 +42,7 @@ Chosen over Jellyfin (couldn't handle iPhone's HEIC photo format — video-only
 tool) and over PhotoPrism (Immich has a proper iOS app with background
 auto-backup).
 
-See [Troubleshooting](./TROUBLESHOOTING.md) for the database recovery
+See [Troubleshooting](https://github.com/sebszp99/homelab-infrastructure/blob/main/TROUBLESHOOTING.md#3-immich-reset-to-setup-screen-after-reboot-data-appeared-lost) for the database recovery
 incident.
 
 ## IPTV — VLAN bridging on OpenWrt
