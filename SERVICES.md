@@ -65,5 +65,5 @@ multiple disks. Apple-client compatibility (`vfs objects = fruit
 streams_xattr`) enabled globally for correct permission/attribute
 handling from iOS/macOS clients.
 
-See [Troubleshooting](./TROUBLESHOOTING.md) for a per-share config override
+See [Troubleshooting](https://github.com/sebszp99/homelab-infrastructure/blob/main/TROUBLESHOOTING.md#5-openmediavault-smb-share-writable-via-cli-read-only-from-ios-files) for a per-share config override
 that silently broke this for one share.
