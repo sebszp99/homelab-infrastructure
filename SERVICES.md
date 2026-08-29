@@ -23,7 +23,7 @@ on a dedicated bridge network (`br-zabbix`), web UI on port `18081`.
 (`lan → docker` firewall forwarding); direct WAN access is explicitly
 rejected with a dedicated firewall rule, verified from an external network.
 
-See [Troubleshooting](./TROUBLESHOOTING.md) for the firewall issue this
+See [Troubleshooting](https://github.com/sebszp99/homelab-infrastructure/blob/main/TROUBLESHOOTING.md#4-zabbix-web-ui-unreachable-from-lan-despite-working-locally-dual-firewall) for the firewall issue this
 setup surfaced.
 
 ## Photo & Video Backup — Immich
