@@ -17,81 +17,101 @@ Real-world problems encountered and how I solved them.
 
 ## Problems & Solutions
 
-### 1. WAN port flaping, losing internet connection
-**Problem**: Router logs showed problem with wan port eth1 
+### 1. WAN port flapping, losing internet connection
+
+**Problem**: Router logs showed the WAN port going up and down repeatedly:
 
 daemon.notice: netifd: Network device 'eth1' link is down
 daemon.notice: netifd: Network device 'eth1' link is up
 
-**Diagnosis**: First problem was temperature on gpon stick
 
+**Diagnosis (1)**: Checked the GPON SFP module temperature:
+```sh
 ethtool -m eth1
-Module temperature                        : 73.85 degrees C / 164.93 degrees F
+```
 
-**Fix**: Added two fans to my Lab Rax 10" Server Rack, the temperature dropped to 58 degrees C.
-**Diagnosis**: Second problem was wich losing pppoe connection after physical link droped (even it was few seconds)
-**Fix**: Forcing aggresive Keep-Alive setting for PPPoE. In /etc/config/network in WAN section added new parameters:
+Module temperature: 73.85 degrees C / 164.93 degrees F
+
+The module was overheating.
+
+**Fix (1)**: Added two fans to the 10" server rack. Temperature dropped to 58°C.
+
+**Diagnosis (2)**: A second, separate issue remained — the PPPoE session was 
+dropping entirely after even a few seconds of physical link loss, instead of 
+recovering automatically.
+
+**Fix (2)**: Forced aggressive PPPoE keep-alive settings. In `/etc/config/network`, 
+WAN section:
 
 option keepalive '3 5'
 option lcp_echo_interval '5'
 option lcp_echo_failure '3'
 
+
+---
+
 ### 2. IPTV not working
+
+**Setup**:
 - WAN port: `eth1`
 - Port for IPTV STB: `eth3`
-- VLAN for (ISP) IPTV: `1020`
+- VLAN for ISP IPTV: `1020`
 - Docker is also running on the router (relevant for troubleshooting)
-**Problem**: The set-top box loaded the configuration/EPG, but there is no picture.
-**Dioagnosis**:
-  ```sh
+
+**Problem**: The set-top box loaded its configuration/EPG, but showed no picture.
+
+**Diagnosis**: Checked whether the STB was getting a DHCP lease:
+```sh
 tcpdump -i eth3 -n port 67 or port 68
 ```
-Result: The set-top box kept sending `DHCP Request`s over and over, with no response (`Offer`).
+Result: the STB kept sending `DHCP Discover/Request`s repeatedly, with no 
+response (`Offer`).
 
-Checking whether the request even passes through the bridge to the service provider's side:
+Checked whether the DHCP traffic even reached the ISP side of the bridge:
 ```sh
 tcpdump -i eth1.1020 -n port 67 or port 68
 ```
-Result: **no traffic** — the DHCP packet did not pass through the `Bridge_iptv` bridge, even though both ports (`eth3`, `eth1.1020`) were correctly in the `forwarding` state.
+Result: **no traffic** — the DHCP packets never crossed the `Bridge_iptv` 
+bridge, even though both ports (`eth3`, `eth1.1020`) were correctly in the 
+`forwarding` state.
 
-Diagnosis — Filtering bridge traffic via netfilter
-
+Checked whether bridge traffic was being filtered by netfilter instead of 
+pure L2 switching:
 ```sh
 sysctl net.bridge.bridge-nf-call-iptables
 ```
-Result: `1` — this means that traffic passing through the L2 bridge was, after all, being routed through the firewall (`bridge-netfilter`) instead of being pure switching.
+Result: `1` — traffic crossing the L2 bridge was being routed through the 
+firewall (`bridge-netfilter`) instead of being switched directly.
 
-### Solution (Part 2) — Disabling bridge-netfilter
-
-Temporary test:
+**Fix (test)**: 
 ```sh
 sysctl -w net.bridge.bridge-nf-call-iptables=0
 ```
-After restarting the set-top box, the picture reappeared — confirming the source of the problem.
+After restarting the STB, the picture appeared — confirming the root cause.
 
-### Making the Change Permanent After Restarting the Router
+**Fix (permanent)**: A plain `/etc/sysctl.d/*.conf` entry didn't survive a 
+reboot on its own, because the `br_netfilter` module wasn't loaded yet when 
+`sysctl.d` was read at boot — it loaded later, when Docker (also running on 
+this router) started, and Docker reset the value back to `1`.
 
-The standard `/etc/sysctl.d/*.conf` file **did not work on its own**, because the `br_netfilter` module had not yet been loaded when `sysctl.d` was read at system startup—it loaded later, when the **Docker** service (present on this router) started, which overrode the value back to `1`.
-
-Solution: a custom startup script with a very high startup number (`START=99`), executed after Docker starts:
-
+Solution: a custom init script with a high start priority (`START=99`), 
+run after Docker starts:
 ```sh
-cat > /etc/init.d/99-bridge-iptv-fix << ‘EOF’
+cat > /etc/init.d/99-bridge-iptv-fix << 'EOF'
 #!/bin/sh /etc/rc.common
 START=99
 STOP=01
-
 start() {
     sysctl -w net.bridge.bridge-nf-call-iptables=0
     sysctl -w net.bridge.bridge-nf-call-ip6tables=0
 }
 EOF
-
 chmod +x /etc/init.d/99-bridge-iptv-fix
 /etc/init.d/99-bridge-iptv-fix enable
 ```
 
-Verified with a full `reboot`—after the restart, `sysctl net.bridge.bridge-nf-call-iptables` correctly returned `0`, and the picture appeared on the set-top box without any manual intervention.
-
+Verified with a full `reboot` — after restart, `sysctl 
+net.bridge.bridge-nf-call-iptables` correctly returned `0`, and the picture 
+appeared on the STB with no manual intervention.
 
 
