@@ -15,17 +15,17 @@ Real incidents from my homelab — problem, diagnosis, and fix.
 ## 1. WAN port flapping, losing internet connection
 
 **Problem**: Router logs showed the WAN port going up and down repeatedly:
-
+```
 daemon.notice: netifd: Network device 'eth1' link is down
 daemon.notice: netifd: Network device 'eth1' link is up
-
+```
 
 **Diagnosis (1)**: Checked the GPON SFP module temperature:
 ```sh
 ethtool -m eth1
 ```
 
-Module temperature: 73.85 degrees C / 164.93 degrees F
+Module temperature: ```73.85 degrees C / 164.93 degrees F```
 
 The module was overheating.
 
@@ -37,11 +37,11 @@ recovering automatically.
 
 **Fix (2)**: Forced aggressive PPPoE keep-alive settings. In `/etc/config/network`,
 WAN section:
-
+```
 option keepalive '3 5'
 option lcp_echo_interval '5'
 option lcp_echo_failure '3'
-
+```
 
 ---
 
@@ -67,10 +67,10 @@ Checked the bridge's actual port membership:
 bridge link show
 ```
 Result:
-
+```
 5: eth3@eth0: ... master br-lan ...
 37: eth1.1020@eth1: ... master Bridge_iptv ...
-
+```
 
 **Root cause**: despite adding `eth3` to `Bridge_iptv` in LuCI, the port
 was still physically a member of `br-lan` (the default LAN bridge) as well.
@@ -189,9 +189,9 @@ Confirmed the SYN reached the router, but the reply was an instant RST —
 pointing to a router-side reject, not a network issue.
 
 **Root cause, layer 1** — an iptables-legacy `DOCKER-USER` rule:
-
+```
 REJECT 0 -- 0.0.0.0/0 0.0.0.0/0 reject-with icmp-port-unreachable
-
+```
 This was meant to block only WAN traffic, but the init script couldn't
 correctly detect the WAN interface on this platform, so it inserted the
 rule with no interface filter at all — blocking everything, LAN included.
