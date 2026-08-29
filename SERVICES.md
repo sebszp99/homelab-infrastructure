@@ -55,7 +55,7 @@ directly to the ISP's network — no routing or NAT.
 bridge VLAN filtering disabled (plain L2 bridge), IGMP snooping + multicast
 querier enabled on the bridge, interface assigned to the `wan` firewall zone.
 
-See [Troubleshooting](./TROUBLESHOOTING.md) for two issues this required
+See [Troubleshooting]([./TROUBLESHOOTING.md](https://github.com/sebszp99/homelab-infrastructure/blob/main/TROUBLESHOOTING.md#2-iptv-not-working)) for two issues this required
 fixing: a bridge port membership conflict, and a bridge-netfilter DHCP block.
 
 ## File Sharing — SMB/CIFS (OpenMediaVault)
