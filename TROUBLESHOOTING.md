@@ -10,7 +10,7 @@ Real incidents from my homelab — problem, diagnosis, and fix.
 4. [Zabbix web UI unreachable from LAN (dual firewall)](#4-zabbix-web-ui-unreachable-from-lan-despite-working-locally-dual-firewall)
 5. [OpenMediaVault SMB share read-only from iOS Files](#5-openmediavault-smb-share-writable-via-cli-read-only-from-ios-files)
 6. [VLAN segmentation broke all LAN/WiFi connectivity (missing PVID on bridge device)](https://github.com/sebszp99/homelab-infrastructure/blob/main/TROUBLESHOOTING.md#6-vlan-segmentation-broke-all-lanwifi-connectivity-missing-pvid-on-bridge-device)
-
+7. Custom firewall zones (iot/guest) associated to Wi-Fi but never got a DHCP lease(https://github.com/sebszp99/homelab-infrastructure/blob/main/TROUBLESHOOTING.md#7-custom-firewall-zones-iotguest-associated-to-wi-fi-but-never-got-a-dhcp-lease)
 ---
 
 ## 1. WAN port flapping, losing internet connection
