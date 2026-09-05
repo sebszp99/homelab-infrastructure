@@ -9,7 +9,7 @@ Real incidents from my homelab — problem, diagnosis, and fix.
 3. [Immich reset to setup screen after reboot](#3-immich-reset-to-setup-screen-after-reboot-data-appeared-lost)
 4. [Zabbix web UI unreachable from LAN (dual firewall)](#4-zabbix-web-ui-unreachable-from-lan-despite-working-locally-dual-firewall)
 5. [OpenMediaVault SMB share read-only from iOS Files](#5-openmediavault-smb-share-writable-via-cli-read-only-from-ios-files)
-6. VLAN segmentation broke all LAN/WiFi connectivity (missing PVID on bridge device)
+6. [VLAN segmentation broke all LAN/WiFi connectivity (missing PVID on bridge device](6#-VLAN-segmentation-broke-all-LAN/WiFi-connectivity-(missing-PVID-on-bridge-device)
 
 ---
 
