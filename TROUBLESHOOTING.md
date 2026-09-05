@@ -445,3 +445,76 @@ the wire while still being dropped before reaching the application layer.
 Keeping a serial console fallback confirmed *before* touching the LAN
 bridge turned a total lockout into a 2-hour fix instead of a full
 reflash.
+
+---
+
+## 7. Custom firewall zones (iot/guest) associated to Wi-Fi but never got a DHCP lease
+
+**Setup**: Continuation of the VLAN segmentation work from incident #6. After
+fixing the bridge PVID issue, the main "trusted" SSID worked again, but the
+newly created `iot` and `guest` firewall zones (each with `Input: reject`,
+matching the default-deny pattern LuCI uses for new zones) had not been
+tested yet.
+
+**Problem**: Devices could see and associate with the `Banana_guest` and
+`Banana_IoT` SSIDs, but got stuck on "connecting..." indefinitely — never
+received an IP address.
+
+**Diagnosis**: Same symptom as incident #6 ("connects but no DHCP lease"),
+but a different layer this time — the underlying bridge/VLAN plumbing was
+already confirmed working. The difference: this failure was scoped only to
+the two *new* zones, while the `lan` zone worked fine.
+
+Checked the DHCPREQUEST/DHCPDISCOVER traffic was reaching the router (it
+was, per the same `tcpdump -i br-lan -n port 67 or port 68` approach as
+#6), so the problem had to be the router *responding* being blocked, not
+the request arriving.
+
+**Root cause**: LuCI's firewall zone wizard automatically wires up implicit
+`Allow-DHCP-Renew`/DNS-related rules for the built-in `lan`/`wan` zones, but
+does **not** do this for custom zones created manually (`iot`, `guest`).
+Both zones had `Input: reject` as their default policy — correct for
+general security, but with no explicit exception, it also blocked
+DHCPREQUEST/DNS packets addressed directly to the router itself from those
+zones. Traffic reached `br-lan.20`/`br-lan.30`, but was rejected before
+`dnsmasq` could respond.
+
+**Fix**: Added explicit firewall rules allowing DHCP and DNS from each new
+zone to the router:
+
+```
+uci add firewall rule
+uci set firewall.@rule[-1].name='Allow-DHCP-DNS-guest'
+uci set firewall.@rule[-1].src='guest'
+uci set firewall.@rule[-1].target='ACCEPT'
+uci add_list firewall.@rule[-1].proto='tcp'
+uci add_list firewall.@rule[-1].proto='udp'
+uci add_list firewall.@rule[-1].dest_port='53'
+uci add_list firewall.@rule[-1].dest_port='67'
+uci add_list firewall.@rule[-1].dest_port='68'
+
+uci add firewall rule
+uci set firewall.@rule[-1].name='Allow-DHCP-DNS-iot'
+uci set firewall.@rule[-1].src='iot'
+uci set firewall.@rule[-1].target='ACCEPT'
+uci add_list firewall.@rule[-1].proto='tcp'
+uci add_list firewall.@rule[-1].proto='udp'
+uci add_list firewall.@rule[-1].dest_port='53'
+uci add_list firewall.@rule[-1].dest_port='67'
+uci add_list firewall.@rule[-1].dest_port='68'
+
+uci commit firewall
+/etc/init.d/firewall restart
+```
+
+Both `Banana_guest` (VLAN 30) and `Banana_IoT` (VLAN 20) got DHCP leases
+immediately after.
+
+**Takeaway**: A default-deny zone (`Input: reject`) blocks traffic *to the
+router itself* from that zone, not just forwarded traffic — this includes
+DHCP and DNS, which clients need before they can do anything else. When
+creating a new isolated zone by hand (rather than through a wizard/preset),
+explicitly allow DHCP+DNS to the router as one of the first rules, or every
+client in that zone will silently fail to get an address with no obvious
+error on the client side.
+
