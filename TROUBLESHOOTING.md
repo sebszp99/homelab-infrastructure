@@ -9,6 +9,7 @@ Real incidents from my homelab — problem, diagnosis, and fix.
 3. [Immich reset to setup screen after reboot](#3-immich-reset-to-setup-screen-after-reboot-data-appeared-lost)
 4. [Zabbix web UI unreachable from LAN (dual firewall)](#4-zabbix-web-ui-unreachable-from-lan-despite-working-locally-dual-firewall)
 5. [OpenMediaVault SMB share read-only from iOS Files](#5-openmediavault-smb-share-writable-via-cli-read-only-from-ios-files)
+6. VLAN segmentation broke all LAN/WiFi connectivity (missing PVID on bridge device)
 
 ---
 
@@ -311,3 +312,136 @@ After reconnecting on iPhone, writes worked correctly.
 **Takeaway**: "read-only, but only from iOS/macOS, while other SMB clients
 work fine" is a strong signal to check the `fruit` VFS module
 configuration specifically, rather than ACL/POSIX permissions.
+
+---
+
+## 6. VLAN segmentation broke all LAN/WiFi connectivity (missing PVID on bridge device)
+
+**Setup**: Implementing network segmentation on the router — VLAN 1 (trusted),
+VLAN 20 (IoT), VLAN 30 (guest) — using OpenWrt's DSA-based Bridge VLAN
+filtering on `br-lan` (MaxLinear MxL862XX switch chip, no `swconfig`). VLAN 1
+untagged on the trusted ports, VLAN 20/30 tagged on the trunk port to the
+Cudy AP.
+
+**Problem**: After `Save & Apply` in LuCI, every client on the LAN — wired
+and Wi-Fi — lost connectivity. Wired clients got `Destination host
+unreachable` when pinging the router (a locally-generated error, meaning ARP
+never resolved). Wi-Fi SSIDs were still visible and clients could associate,
+but never received a DHCP lease. The issue survived multiple full
+power-cycles, ruling out "unsaved changes, waiting for LuCI's rollback timer"
+— that timer does not survive a reboot.
+
+**Diagnosis**: Recovered access out-of-band via the router's USB-C serial
+console (115200 baud), since no network path was available.
+
+Confirmed the UCI config was intact and correctly described the intended
+VLANs:
+
+```
+uci show network
+```
+
+Ruled out a bad physical link by testing on a different port — same
+failure.
+
+Confirmed `dnsmasq` was running with correct `dhcp-range` entries for `lan`,
+`iot`, and `guest`:
+
+```
+ps | grep dnsmasq
+cat /var/etc/dnsmasq.conf.cfg01411c
+```
+
+Captured live traffic directly on the bridge:
+
+```
+tcpdump -i br-lan -n port 67 or port 68
+```
+
+Result: `DHCPREQUEST` packets from clients **were** arriving at `br-lan`,
+but the router never responded.
+
+Checked the firewall for anything blocking UDP 67/68:
+
+```
+nft list ruleset
+```
+
+No blocking rule existed — `accept_from_lan`/`accept_to_lan` were correctly
+permissive.
+
+Inspected the switch chip's actual hardware VLAN table (not just the
+Linux-side UCI config) — this was the key step:
+
+```
+bridge vlan show
+```
+
+Every physical port showed `1 PVID Egress Untagged`, except the bridge
+device itself:
+
+```
+mxl_lan3          1 PVID Egress Untagged
+                  20
+                  30
+br-lan            1              <-- missing "PVID Egress Untagged"
+                  20
+                  30
+```
+
+**Root cause**: `br-lan` isn't just a Layer 2 forwarding device — it's also
+the interface the router's own IP stack (and `dnsmasq`) listens on.
+Untagged VLAN 1 frames were correctly switched in hardware onto the bridge,
+but because the bridge's own entry in the kernel VLAN table lacked the PVID
+(default VLAN) and untagged (egress) flags, those frames were never handed
+up to the host's IP stack. `dnsmasq` never actually saw the DHCP requests
+at the application layer, even though `tcpdump` showed them on the wire —
+that capture point sits below where this filtering happens.
+
+Critically, setting `local='1'` on the `bridge-vlan` UCI section —
+
+```
+uci set network.@bridge-vlan[0].local='1'
+```
+
+— adds the bridge as a VLAN *member*, but does not automatically set the
+PVID/untagged flags for it on this driver combination (MaxLinear MxL862XX +
+DSA). This looks like a driver-level gap rather than intended OpenWrt
+behavior.
+
+**Fix (test)**: Applied directly to the kernel's bridge VLAN table:
+
+```
+bridge vlan add vid 1 dev br-lan self pvid untagged
+```
+
+Connectivity was restored instantly.
+
+**Fix (permanent)**: This setting isn't stored in UCI and doesn't survive
+`/etc/init.d/network restart` or a reboot, so a hotplug script re-applies it
+every time the `lan` interface comes up:
+
+```
+cat > /etc/hotplug.d/iface/95-fix-lan-vlan1 << 'EOF'
+#!/bin/sh
+[ "$ACTION" = "ifup" ] || exit 0
+[ "$INTERFACE" = "lan" ] || exit 0
+bridge vlan add vid 1 dev br-lan self pvid untagged 2>/dev/null
+EOF
+chmod +x /etc/hotplug.d/iface/95-fix-lan-vlan1
+```
+
+Verified with both `/etc/init.d/network restart` and a full reboot —
+`bridge vlan show` correctly shows `br-lan 1 PVID Egress Untagged` after
+each, with no manual intervention.
+
+**Takeaway**: When VLAN filtering misbehaves on DSA, `bridge vlan show` is
+the ground truth — `uci show network` only describes intent, not what the
+hardware is actually enforcing. The bridge device itself needs a PVID, not
+just its member ports, and that's easy to miss since most guides only cover
+per-port tagged/untagged settings. Also: `tcpdump` showing traffic on an
+interface is not proof a service is receiving it — frames can be visible on
+the wire while still being dropped before reaching the application layer.
+Keeping a serial console fallback confirmed *before* touching the LAN
+bridge turned a total lockout into a 2-hour fix instead of a full
+reflash.
