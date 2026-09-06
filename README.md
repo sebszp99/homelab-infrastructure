@@ -6,17 +6,20 @@ Real-world problems encountered and how I solved them.
 ## Architecture
 
 - **Router**: Banana Pi BPI-R4 Pro running a custom-built OpenWrt image
+- **Network segmentation**: VLANs (trusted / IoT / guest) with per-zone
+firewall isolation between them
+- **DNS filtering**: AdGuard Home (network-wide ad/tracker/malware blocking
+across all VLANs)
 - **VPN**: WireGuard for remote access
 - **NAS**: Raspberry Pi 5 (4GB) + Radxa Penta SATA HAT, OpenMediaVault (OMV)
 - **Storage pool**: mergerfs pool combining multiple disks, mounted at
-  `/srv/mergerfs/Magazyn`
+/srv/mergerfs/Magazyn
 - **Virtualization**: Proxmox VE (separate hardware)
 - **Backup storage**: TrueNAS (RAID1)
-- **Monitoring**: Zabbix (Docker Compose on the router)
-- **Services** (Docker Compose on OMV): Immich (photo/video backup), Nextcloud
-- **Network extras**: IPTV bridged via VLAN, SMB/CIFS file sharing
+- **Services** (Docker Compose on OMV): Immich (photo/video backup),
+Jellyfin (media streaming), Nextcloud
 
 ## More
 
-- [Deployed Services](./SERVICES.md) — what's running and how it's configured
-- [Troubleshooting](./TROUBLESHOOTING.md) — real incidents and how I solved them
+- [Deployed Services](https://github.com/sebszp99/homelab-infrastructure/blob/main/SERVICES.md) — what's running and how it's configured
+- [Troubleshooting](https://github.com/sebszp99/homelab-infrastructure/blob/main/TROUBLESHOOTING.md) — real incidents and how I solved them
