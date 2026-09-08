@@ -138,3 +138,31 @@ for the full debugging path: a misread flag (`-A` vs the real `-q`), no TLS
 backend installed at all, a broken vendor package feed blocking `apk`, and
 an IPv6 route black-holing package downloads — four separate obstacles
 stacked on what looked like a one-line config change.
+
+## Brute-Force & Reputation-Based Protection — banIP & fail2ban
+
+Two complementary layers on top of the SSH/LuCI hardening: `banip` blocks
+known-malicious IPs on the WAN side using reputation feeds, while
+`fail2ban` watches local auth logs for repeated failed SSH logins and bans
+the source IP directly via nftables.
+
+**Config — banip**: auto-detects `pppoe-wan` as the WAN device. Blocklist
+feeds enabled: `firehol1`, `greensnow`, `spamhaus`. Runs as its own nftables
+table (`inet banIP`), separate from the main `fw4` table. Status check:
+`/usr/bin/banip-service.sh status` (not a plain `banip` CLI binary).
+
+**Config — fail2ban**: full upstream Python fail2ban (no lightweight
+`sshguard` package available for this platform/feed). Jail defined at
+`/etc/fail2ban/jail.d/dropbear.local`: watches `/var/log/secure` (this
+build routes SSH auth logs there via rsyslog, not the default
+`/var/log/messages`/`logread`), 3 failed attempts within 10 minutes bans
+the source IP for 1 hour via an `nftables`-based action. `ignoreip` excludes
+the trusted LAN and WireGuard subnets — SSH isn't exposed to WAN at all
+(confirmed via the firewall ruleset), so this jail's real job is
+defense-in-depth against an internal misconfiguration, not internet-facing
+brute force.
+
+See [Troubleshooting](https://github.com/sebszp99/homelab-infrastructure/blob/main/TROUBLESHOOTING.md#9-fail2ban-showed-0-jails-despite-a-correctly-written-config--then-banned-my-own-ip-on-the-first-real-test)
+for the setup issues this required working through: `procd`'s `start` vs
+`restart` semantics silently ignoring a new jail file, auth logs living in
+an unexpected file, and self-banning during the first live test.
