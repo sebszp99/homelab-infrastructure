@@ -518,3 +518,100 @@ explicitly allow DHCP+DNS to the router as one of the first rules, or every
 client in that zone will silently fail to get an address with no obvious
 error on the client side.
 
+---
+
+## 8. Enabling HTTPS redirect for LuCI did nothing — no TLS support was installed at all
+
+**Setup**: Hardening remote access to the router as part of the VLAN/security
+work — SSH was switched to key-only auth, and the next step was forcing
+LuCI (the `uhttpd` web admin panel) to redirect HTTP to HTTPS so the login
+credentials wouldn't travel in plaintext.
+
+**Problem**: Set `uhttpd.main.redirect_https='1'` and restarted the
+service. `http://192.168.1.1` kept loading over plain HTTP with no
+redirect at all.
+
+**Diagnosis**: Checked the running process directly rather than trusting
+the UCI config alone:
+
+```
+ps | grep uhttpd
+cat /proc/<pid>/cmdline | tr '\0' ' '
+```
+
+The command line was missing `-q` (the actual "redirect to HTTPS" flag) on
+the first check — a red herring initially made it look like `-A` (TCP
+keepalive, not HTTPS-related despite the misleading similarity to other
+tools' flag conventions) was the relevant flag. After confirming the real
+flag name via `uhttpd --help`, a second restart did produce `-q` in the
+command line — but there was still no `-s` (HTTPS listener), `-C`
+(certificate), or `-K` (key) flag anywhere. So the redirect logic was
+correctly configured, but it was redirecting to a port nothing was
+listening on.
+
+Checked for the certificate files the init script is supposed to
+auto-generate:
+
+```
+ls -la /etc/uhttpd.crt /etc/uhttpd.key
+```
+
+Neither existed. Checked installed packages:
+
+```
+apk list -I | grep -i uhttpd
+```
+
+Only `uhttpd` and `uhttpd-mod-ubus` were installed — **no TLS backend at
+all**. This build of OpenWrt (a custom 25.12-SNAPSHOT image) never had TLS
+support for the web server installed in the first place, so `redirect_https`
+had nothing to redirect to.
+
+**Root cause**: `uhttpd`'s TLS support isn't compiled in by default — it
+depends on a separate library package. The obvious guess based on other
+OpenWrt component naming (`uhttpd-mod-tls-mbedtls`) turned out to be wrong;
+the actual package is `libuhttpd-mbedtls` (found via `apk search uhttpd`
+after the guessed name failed with "no such package"). Even after
+installing that, no certificate appeared — `libuhttpd-mbedtls` only
+provides the TLS *library*; the actual self-signed certificate generation
+is a separate tool, `px5g-mbedtls`, which the init script calls
+automatically if present but silently skips if missing.
+
+Two unrelated problems surfaced and had to be cleared along the way:
+
+1. `apk update` failed because one feed in
+   `/etc/apk/repositories.d/distfeeds.list` (a vendor-specific
+   `mtk_openwrt_feed`) was returning a truncated/corrupt package index,
+   which blocked `apk add` for anything until the broken line was
+   temporarily commented out.
+2. `apk update` and `ping` to `downloads.openwrt.org` were hanging for
+   several minutes — traced to IPv6 packet loss on the route to that host's
+   AAAA record, while IPv4 over HTTPS via `curl` (which has its own
+   fast-fallback logic) worked instantly. `apk`/`wget` don't have
+   Happy-Eyeballs-style fallback, so they sat on the dead IPv6 path.
+
+**Fix**:
+
+```
+apk add libuhttpd-mbedtls
+apk add px5g-mbedtls
+/etc/init.d/uhttpd restart
+```
+
+After that, `/etc/uhttpd.crt` and `/etc/uhttpd.key` were generated
+automatically, and the running process picked up `-s 0.0.0.0:443 -s [::]:443
+-C /etc/uhttpd.crt -K /etc/uhttpd.key -q`. Verified end to end:
+
+```
+curl -vk https://192.168.1.1/          # 200 OK
+curl -v  http://192.168.1.1/           # 307 Temporary Redirect -> https://
+```
+
+**Takeaway**: A UCI option being "set" doesn't mean the feature it controls
+actually works — always check the live process's command line
+(`/proc/<pid>/cmdline`) against the tool's real `--help` output rather than
+assuming what a flag does from naming conventions in other tools. On a
+custom/minimal OpenWrt build, don't assume standard components like TLS for
+the web server are present just because the config option for it exists;
+verify the underlying package and its dependent tooling (library *and*
+cert-generation utility are separate packages here) are actually installed.
