@@ -616,3 +616,86 @@ custom/minimal OpenWrt build, don't assume standard components like TLS for
 the web server are present just because the config option for it exists;
 verify the underlying package and its dependent tooling (library *and*
 cert-generation utility are separate packages here) are actually installed.
+
+---
+
+## 9. fail2ban showed 0 jails despite a correctly written config — then banned my own IP on the first real test
+
+**Setup**: Adding brute-force protection on top of the SSH/LuCI hardening —
+`banip` for WAN-side reputation list blocking, and `fail2ban` for local
+detection of repeated failed logins against `dropbear` (OpenWrt's SSH
+daemon). `sshguard` wasn't available in this build's apk feed/arch, so
+`fail2ban` (full Python port, not a lightweight variant) was used instead.
+
+**Problem 1 — jail.d was silently ignored.** Wrote a standard
+`/etc/fail2ban/jail.d/dropbear.local` (`filter = dropbear`, `maxretry = 3`,
+`action = %(action_)s`), ran `/etc/init.d/fail2ban start`, but
+`fail2ban-client status` reported `Number of jail: 0`.
+
+**Diagnosis 1**: `fail2ban-server` (confirmed via `cat /etc/init.d/fail2ban`)
+is the genuine upstream fail2ban — the init script only generates the
+`dbfile` line and starts the server with `procd`. Checking
+`/var/log/fail2ban.log` showed the server had actually started **before**
+the jail file was even created (likely spun up automatically as part of
+the `apk add fail2ban` post-install step). On OpenWrt's `procd`, calling
+`start` on an already-running service is a no-op — it doesn't reload
+config. `restart` was needed to force it to re-read everything.
+
+**Fix 1**:
+```
+/etc/init.d/fail2ban restart
+fail2ban-client status        # now shows: Jail list: dropbear
+```
+
+**Problem 2 — the jail showed 0 failures despite deliberately bad SSH
+attempts.** Tried connecting via PuTTY with no key configured, expecting
+that to count as a failed attempt.
+
+**Diagnosis 2**: Checked `/etc/fail2ban/filter.d/dropbear.conf` — it only
+matches specific log lines (`Login attempt for nonexistent user`, `Max
+auth tries reached`), not generic disconnects. A PuTTY session that never
+even offers a key doesn't generate any of those; the server never saw a
+real auth attempt to reject. Also discovered the jail's `logpath` was
+pointed at the wrong file entirely: this build routes auth-related logs
+through `rsyslog` to `/var/log/secure`, not `/var/log/messages` — and
+`/var/log/secure` isn't visible via `logread` either. The relevant line in
+`/etc/rsyslog.conf`:
+```
+*.info;mail.none;authpriv.none;cron.none   /var/log/messages
+authpriv.*                                  /var/log/secure
+```
+`authpriv.none` explicitly excludes SSH auth logs from `messages`.
+
+**Fix 2**: pointed the jail at the correct file, and triggered the actual
+matching failure mode (repeated logins as a nonexistent username):
+```
+logpath = /var/log/secure
+```
+
+**Problem 3 — the first successful test locked me out of my own SSH
+session.** Once the jail was reading the right file and matching the right
+pattern, three login attempts as a nonexistent user correctly triggered a
+ban — of my own IP, since fail2ban bans by source IP, not by which
+username was tried. This killed the very session being used to configure
+it.
+
+**Fix 3**: recovered via the router's serial console (independent of any
+network state — the same fallback used during the earlier VLAN outage),
+unbanned the IP (`fail2ban-client set dropbear unbanip <ip>`), then added
+an explicit allowlist for trusted networks so this can't happen again:
+```
+ignoreip = 127.0.0.1/8 192.168.1.0/24 10.10.0.0/24
+```
+This also matches the actual threat model here: SSH isn't exposed to WAN
+at all (confirmed earlier via the nftables ruleset), so fail2ban's role is
+defense-in-depth against an internal misconfiguration or compromised LAN
+device, not stopping internet-wide brute force — which makes excluding the
+trusted LAN/VPN ranges the correct call, not a weakening of the setup.
+
+**Takeaway**: Never test a self-defense mechanism (ban/lockout) from the
+same connection you're using to configure it, once it's live — always keep
+an independent access path (serial console, a second VPN peer, physical
+access) ready before triggering the test. Also: a service already running
+before its config file exists is easy to miss — `status` showing unexpected
+results is a cue to check whether the process actually reloaded, not just
+whether the file on disk looks correct.
