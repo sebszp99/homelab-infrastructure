@@ -113,3 +113,28 @@ router's own IP as DNS, which AdGuard Home now answers on instead of
 
 **Result**: ~25-30% of DNS queries blocked in normal daily use (ad/tracker
 domains), transparently across the trusted, IoT, and guest networks.
+
+## Remote Access Hardening — SSH & LuCI
+
+Key-only SSH and HTTPS-only web admin for the router, on top of the
+existing WAN-side firewall drop (SSH/LuCI were never exposed to the
+internet in the first place — this is defense in depth for LAN/VPN access).
+
+**Config**: `dropbear` (SSH) reconfigured for public-key auth only
+(`PasswordAuth` and `RootPasswordAuth` both off) after confirming key-based
+login worked in a second, parallel session — never disabled the fallback
+method until the replacement was verified live. Remote SSH access still
+works normally over the existing WireGuard VPN, since the firewall's `lan`
+input chain also covers the `WireGuard_VPN` interface.
+
+`uhttpd` (LuCI) set to force-redirect HTTP → HTTPS
+(`redirect_https='1'`), which required installing TLS support that this
+custom OpenWrt build didn't ship with at all: `libuhttpd-mbedtls` (the TLS
+library) plus `px5g-mbedtls` (the tool that actually generates the
+self-signed cert/key pair — the library alone doesn't do this).
+
+See [Troubleshooting](https://github.com/sebszp99/homelab-infrastructure/blob/main/TROUBLESHOOTING.md#8-enabling-https-redirect-for-luci-did-nothing--no-tls-support-was-installed-at-all)
+for the full debugging path: a misread flag (`-A` vs the real `-q`), no TLS
+backend installed at all, a broken vendor package feed blocking `apk`, and
+an IPv6 route black-holing package downloads — four separate obstacles
+stacked on what looked like a one-line config change.
